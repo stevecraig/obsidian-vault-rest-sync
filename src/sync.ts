@@ -9,6 +9,7 @@ import {
 } from "./api";
 import type { RemoteVaultSyncSettings } from "./settings";
 import type { SyncEvent, SyncEventType } from "./activity-types";
+import { merge3 } from "./merge3";
 
 /** Per-file sync status */
 export type FileSyncStatus =
@@ -50,6 +51,7 @@ export interface SyncResult {
 	deleted: number;
 	pushed: number;
 	conflicts: number;
+	autoMerged: number;
 	errors: number;
 }
 
@@ -94,6 +96,7 @@ export async function performSync(
 		deleted: 0,
 		pushed: 0,
 		conflicts: 0,
+		autoMerged: 0,
 		errors: 0,
 	};
 
@@ -325,21 +328,72 @@ export async function performSync(
 			}
 
 			if (remoteChanged && localChanged) {
-				// Both changed — conflict
-				onProgress?.(`Conflict: ${remotePath}`);
-				try {
-					await createConflict(app, settings, syncFolder, remotePath, localFile);
-					fileStates[remotePath] = {
-						remoteSyncedAt: remoteEntry.updatedAt,
-						localModifiedAt: localFile.stat.mtime,
-						status: "conflicted",
-						remoteHash,
-					};
-					result.conflicts++;
-					emit("conflict", remotePath);
-				} catch (e) {
-					console.error(`Remote Vault Sync: conflict handling failed for ${remotePath}`, e);
-					result.errors++;
+				// Both changed — attempt 3-way merge if ancestor is available
+				const ancestor = state?.ancestorContent;
+				let merged = false;
+
+				if (ancestor && ancestor.length > 0) {
+					// Read local content if not already loaded
+					const lc = localContent ?? await app.vault.read(localFile);
+					// Skip merge for binary-looking content (no newlines in long content)
+					const looksTextual = lc.length < 200 || lc.includes("\n");
+					if (looksTextual) {
+						try {
+							const remoteFile = await readFile(
+								settings.apiUrl,
+								settings.apiToken,
+								remotePath
+							);
+							if (remoteFile) {
+								const remoteContent = remoteFile.content;
+								const mergeResult = merge3(ancestor, lc, remoteContent);
+								if (mergeResult.conflicts.length === 0) {
+									// Auto-merge succeeded — write merged content locally and push
+									onProgress?.(`Auto-merged: ${remotePath}`);
+									await app.vault.modify(localFile, mergeResult.merged);
+									await writeFile(
+										settings.apiUrl,
+										settings.apiToken,
+										remotePath,
+										mergeResult.merged
+									);
+									const mergedHash = await sha256(mergeResult.merged);
+									fileStates[remotePath] = {
+										remoteSyncedAt: new Date().toISOString(),
+										localModifiedAt: Date.now(),
+										status: "synced",
+										remoteHash: mergedHash,
+										localHash: mergedHash,
+										ancestorContent: sizedAncestor(mergeResult.merged),
+									};
+									result.autoMerged++;
+									emit("merged", remotePath);
+									merged = true;
+								}
+							}
+						} catch (e) {
+							console.error(`Remote Vault Sync: auto-merge failed for ${remotePath}, falling back to conflict`, e);
+						}
+					}
+				}
+
+				if (!merged) {
+					// Fall through to conflict flow
+					onProgress?.(`Conflict: ${remotePath}`);
+					try {
+						await createConflict(app, settings, syncFolder, remotePath, localFile);
+						fileStates[remotePath] = {
+							remoteSyncedAt: remoteEntry.updatedAt,
+							localModifiedAt: localFile.stat.mtime,
+							status: "conflicted",
+							remoteHash,
+						};
+						result.conflicts++;
+						emit("conflict", remotePath);
+					} catch (e) {
+						console.error(`Remote Vault Sync: conflict handling failed for ${remotePath}`, e);
+						result.errors++;
+					}
 				}
 			} else if (remoteChanged && !localChanged) {
 				// Remote changed, local untouched — pull
