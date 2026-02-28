@@ -657,7 +657,7 @@ export async function resolveConflicts(
 
 // --- Hash utilities ---
 
-async function sha256(content: string): Promise<string> {
+export async function sha256(content: string): Promise<string> {
 	const data = new TextEncoder().encode(content);
 	const buf = await crypto.subtle.digest("SHA-256", data);
 	return Array.from(new Uint8Array(buf))
