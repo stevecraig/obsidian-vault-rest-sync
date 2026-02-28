@@ -6,6 +6,10 @@ export interface RemoteVaultSyncSettings {
 	apiToken: string;
 	syncFolder: string;
 	syncIntervalMinutes: number;
+	/** Enable SSE-based live sync for real-time change notifications */
+	enableSSE: boolean;
+	/** Maximum reconnect delay for SSE in milliseconds */
+	sseReconnectMaxMs: number;
 }
 
 export const DEFAULT_SETTINGS: RemoteVaultSyncSettings = {
@@ -13,6 +17,8 @@ export const DEFAULT_SETTINGS: RemoteVaultSyncSettings = {
 	apiToken: "",
 	syncFolder: "Remote Vault",
 	syncIntervalMinutes: 15,
+	enableSSE: true,
+	sseReconnectMaxMs: 30000,
 };
 
 export class RemoteVaultSyncSettingTab extends PluginSettingTab {
@@ -73,7 +79,7 @@ export class RemoteVaultSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Sync interval")
-			.setDesc("Minutes between automatic syncs (minimum 1).")
+			.setDesc("Minutes between automatic syncs (minimum 1). Acts as a fallback when SSE is active.")
 			.addText((text) =>
 				text
 					.setPlaceholder("15")
@@ -86,6 +92,52 @@ export class RemoteVaultSyncSettingTab extends PluginSettingTab {
 							this.plugin.settings.syncIntervalMinutes = num;
 							await this.plugin.saveSettings();
 							this.plugin.restartSyncInterval();
+						}
+					})
+			);
+
+		containerEl.createEl("h3", { text: "Live sync (SSE)" });
+
+		new Setting(containerEl)
+			.setName("Enable live sync")
+			.setDesc(
+				"Use Server-Sent Events for real-time change notifications. " +
+				"When enabled, remote changes are picked up within seconds. " +
+				"Polling still runs as a fallback at a longer interval."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.enableSSE)
+					.onChange(async (value) => {
+						this.plugin.settings.enableSSE = value;
+						await this.plugin.saveSettings();
+						this.plugin.restartSSE();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Reconnect max delay")
+			.setDesc(
+				"Maximum delay (in seconds) between SSE reconnection attempts. " +
+				"Uses exponential backoff up to this limit."
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("30")
+					.setValue(
+						String(
+							Math.round(
+								this.plugin.settings.sseReconnectMaxMs / 1000
+							)
+						)
+					)
+					.onChange(async (value) => {
+						const num = parseInt(value, 10);
+						if (!isNaN(num) && num >= 5) {
+							this.plugin.settings.sseReconnectMaxMs =
+								num * 1000;
+							await this.plugin.saveSettings();
+							this.plugin.restartSSE();
 						}
 					})
 			);
