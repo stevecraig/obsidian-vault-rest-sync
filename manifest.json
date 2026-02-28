@@ -1,9 +1,9 @@
 {
 	"id": "remote-vault-sync",
 	"name": "Remote Vault Sync",
-	"version": "1.0.0",
+	"version": "2.0.0",
 	"minAppVersion": "1.0.0",
-	"description": "Sync files from a remote REST API into your vault. Read-only — remote files are pulled and kept up to date automatically.",
+	"description": "Two-way sync between your vault and a remote REST API. Pull, push, and detect conflicts automatically.",
 	"author": "stevecraig",
 	"authorUrl": "https://github.com/stevecraig",
 	"isDesktopOnly": false
