@@ -16,11 +16,21 @@ import {
 import { SyncDecorator } from "./decorations";
 import { readFile } from "./api";
 import { SSEClient, SSEFileEvent } from "./sse";
+import {
+	SyncEvent,
+	generateCycleId,
+	trimEvents,
+} from "./activity-types";
+import {
+	SyncActivityView,
+	VIEW_TYPE_SYNC_ACTIVITY,
+} from "./activity-view";
 
 interface PluginData {
 	settings: RemoteVaultSyncSettings;
 	lastSync: string | null;
 	files: SyncStateMap;
+	activityEvents?: SyncEvent[];
 }
 
 /** Default polling interval (minutes) when SSE is connected and healthy */
@@ -51,6 +61,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 	settings: RemoteVaultSyncSettings = DEFAULT_SETTINGS;
 	lastSync: string | null = null;
 	fileStates: SyncStateMap = {};
+	activityEvents: SyncEvent[] = [];
 	private syncIntervalId: number | null = null;
 	private syncing = false;
 	private localChanges: LocalChange[] = [];
@@ -59,16 +70,30 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 	private sseClient: SSEClient | null = null;
 	/** Whether SSE is currently connected (used to lengthen poll interval) */
 	private sseConnected = false;
+	/** Timestamp (ms) when the current sync interval started */
+	private syncIntervalStartedAt: number = 0;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
 		this.addSettingTab(new RemoteVaultSyncSettingTab(this.app, this));
 
+		// Register the sync activity view
+		this.registerView(
+			VIEW_TYPE_SYNC_ACTIVITY,
+			(leaf) => new SyncActivityView(leaf)
+		);
+
 		this.addCommand({
 			id: "sync-now",
 			name: "Sync now",
 			callback: () => this.runSync(),
+		});
+
+		this.addCommand({
+			id: "view-activity",
+			name: "View activity",
+			callback: () => this.openActivityView(),
 		});
 
 		// Status bar
@@ -122,6 +147,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			this.decorator = null;
 		}
 		this.stopSSE();
+		this.app.workspace.detachLeavesOfType(VIEW_TYPE_SYNC_ACTIVITY);
 	}
 
 	async loadSettings(): Promise<void> {
@@ -133,6 +159,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		);
 		this.lastSync = data?.lastSync ?? null;
 		this.fileStates = data?.files ?? {};
+		this.activityEvents = data?.activityEvents ?? [];
 	}
 
 	async saveSettings(): Promise<void> {
@@ -140,6 +167,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			settings: this.settings,
 			lastSync: this.lastSync,
 			files: this.fileStates,
+			activityEvents: this.activityEvents,
 		};
 		await this.saveData(data);
 	}
@@ -154,6 +182,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			  )
 			: this.settings.syncIntervalMinutes;
 		const ms = intervalMinutes * 60 * 1000;
+		this.syncIntervalStartedAt = Date.now();
 		this.syncIntervalId = this.registerInterval(
 			window.setInterval(() => this.runSync(), ms)
 		);
@@ -457,7 +486,22 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 				syncFolder,
 				this.fileStates
 			);
+
+			const cycleId = generateCycleId();
+
+			// Emit resolved events for conflicts resolved before this cycle
 			if (resolved > 0) {
+				// Find which files were just resolved by checking current state
+				for (const [path, state] of Object.entries(this.fileStates)) {
+					if (state.status === "synced" && state.localModifiedAt === Date.now()) {
+						this.activityEvents.push({
+							type: "resolved",
+							path,
+							timestamp: new Date().toISOString(),
+							cycleId,
+						});
+					}
+				}
 				await this.saveSettings();
 			}
 
@@ -465,17 +509,25 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			changes = [...this.localChanges];
 			this.localChanges = [];
 
-			const { result, newLastSync, fileStates } = await performSync(
+			const { result, newLastSync, fileStates, events } = await performSync(
 				this.app,
 				this.settings,
 				this.lastSync,
 				{ ...this.fileStates },
-				changes
+				changes,
+				undefined,
+				cycleId
 			);
+
+			// Append sync events and trim to max
+			if (events.length > 0) {
+				this.activityEvents = trimEvents([...this.activityEvents, ...events]);
+			}
 
 			this.lastSync = newLastSync;
 			this.fileStates = fileStates;
 			await this.saveSettings();
+			this.refreshActivityView();
 
 			const parts: string[] = [];
 			if (result.created > 0) parts.push(`${result.created} pulled`);
@@ -504,5 +556,58 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			this.updateStatusBar();
 			this.refreshDecorations();
 		}
+	}
+
+	/**
+	 * Open or focus the sync activity view.
+	 */
+	private async openActivityView(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_SYNC_ACTIVITY);
+		if (existing.length > 0) {
+			this.app.workspace.revealLeaf(existing[0]);
+			this.refreshActivityView();
+			return;
+		}
+
+		const leaf = this.app.workspace.getLeaf("tab");
+		await leaf.setViewState({
+			type: VIEW_TYPE_SYNC_ACTIVITY,
+			active: true,
+		});
+		this.app.workspace.revealLeaf(leaf);
+		this.refreshActivityView();
+	}
+
+	/**
+	 * Refresh all open activity views with current data.
+	 */
+	private refreshActivityView(): void {
+		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_SYNC_ACTIVITY);
+		const nextSyncSeconds = this.getNextSyncSeconds();
+		for (const leaf of leaves) {
+			const view = leaf.view;
+			if (view instanceof SyncActivityView) {
+				view.setSyncFolder(this.settings.syncFolder);
+				view.setEvents(this.activityEvents);
+				view.setSyncTiming(this.lastSync, nextSyncSeconds);
+			}
+		}
+	}
+
+	/**
+	 * Calculate seconds until the next scheduled sync.
+	 */
+	private getNextSyncSeconds(): number | null {
+		if (!this.syncIntervalId) return null;
+		const intervalMinutes = this.sseConnected
+			? Math.max(
+					this.settings.syncIntervalMinutes,
+					SSE_FALLBACK_INTERVAL_MINUTES
+			  )
+			: this.settings.syncIntervalMinutes;
+		const intervalMs = intervalMinutes * 60 * 1000;
+		const elapsed = Date.now() - this.syncIntervalStartedAt;
+		const remaining = Math.max(0, intervalMs - elapsed);
+		return Math.round(remaining / 1000);
 	}
 }
