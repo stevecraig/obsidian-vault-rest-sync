@@ -5,6 +5,7 @@ export interface FileListEntry {
 	createdAt: string;
 	updatedAt: string;
 	size: number;
+	hash?: string;
 }
 
 export interface FileContent {
@@ -12,6 +13,7 @@ export interface FileContent {
 	createdAt: string;
 	updatedAt: string;
 	size: number;
+	hash?: string;
 }
 
 export class ApiError extends Error {
@@ -72,22 +74,37 @@ export async function listFiles(
 
 /**
  * Read a single file's content from the remote API.
+ * Pass etag to use If-None-Match — returns null on 304 (content unchanged).
  */
 export async function readFile(
 	baseUrl: string,
 	token: string,
-	path: string
-): Promise<FileContent> {
+	path: string,
+	etag?: string
+): Promise<FileContent | null> {
 	const url = `${baseUrl.replace(/\/+$/, "")}/${encodeURI(path)}`;
+	const h = headers(token);
+	if (etag) {
+		h["If-None-Match"] = `"${etag}"`;
+	}
 
-	const response = await requestUrl({
-		url,
-		method: "GET",
-		headers: headers(token),
-	});
+	try {
+		const response = await requestUrl({
+			url,
+			method: "GET",
+			headers: h,
+		});
 
-	handleResponse(response);
-	return response.json as FileContent;
+		if (response.status === 304) return null;
+		handleResponse(response);
+		return response.json as FileContent;
+	} catch (e) {
+		// requestUrl throws on non-2xx; check for 304
+		if (e && typeof e === "object" && "status" in e) {
+			if ((e as { status: number }).status === 304) return null;
+		}
+		throw e;
+	}
 }
 
 /**
