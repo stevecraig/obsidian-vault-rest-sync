@@ -21,6 +21,10 @@ export interface FileSyncState {
 	remoteSyncedAt: string;
 	localModifiedAt: number;
 	status: FileSyncStatus;
+	/** SHA-256 hash of remote content at last sync */
+	remoteHash?: string;
+	/** SHA-256 hash of local content at last sync */
+	localHash?: string;
 }
 
 /** The full sync state stored in plugin data.files */
@@ -150,7 +154,12 @@ export async function performSync(
 
 		if (isLocallyDeleted) {
 			// Local deleted, remote exists
-			if (state && remoteUpdatedAt > new Date(state.remoteSyncedAt).getTime()) {
+			const remoteModified = state
+				? (remoteEntry.hash && state.remoteHash)
+					? remoteEntry.hash !== state.remoteHash
+					: remoteUpdatedAt > new Date(state.remoteSyncedAt).getTime()
+				: false;
+			if (state && remoteModified) {
 				// Remote was modified since last sync — conflict: re-pull
 				onProgress?.(`Conflict (deleted locally, changed remotely): ${remotePath}`);
 				try {
@@ -159,6 +168,7 @@ export async function performSync(
 						remoteSyncedAt: remoteEntry.updatedAt,
 						localModifiedAt: Date.now(),
 						status: "conflicted",
+						remoteHash: remoteEntry.hash,
 					};
 					result.conflicts++;
 				} catch (e) {
@@ -195,11 +205,13 @@ export async function performSync(
 			// New remote file, no local version — pull
 			onProgress?.(`Pulling new: ${remotePath}`);
 			try {
-				await pullFile(app, settings, syncFolder, remotePath, result, "created");
+				const pulled = await pullFile(app, settings, syncFolder, remotePath, result, "created");
 				fileStates[remotePath] = {
 					remoteSyncedAt: remoteEntry.updatedAt,
 					localModifiedAt: Date.now(),
 					status: "synced",
+					remoteHash: remoteEntry.hash,
+					localHash: pulled?.hash ?? remoteEntry.hash,
 				};
 			} catch (e) {
 				console.error(`Remote Vault Sync: pull failed for ${remotePath}`, e);
@@ -212,15 +224,20 @@ export async function performSync(
 			// File was in sync state but is gone locally
 			// If we didn't track it as a local delete, it was deleted outside our events
 			// Treat as local delete + remote unchanged → delete on server
-			if (remoteUpdatedAt > new Date(state.remoteSyncedAt).getTime()) {
+			const remoteChangedHere = (remoteEntry.hash && state.remoteHash)
+				? remoteEntry.hash !== state.remoteHash
+				: remoteUpdatedAt > new Date(state.remoteSyncedAt).getTime();
+			if (remoteChangedHere) {
 				// Remote changed — re-pull
 				onProgress?.(`Re-pulling (missing locally, changed remotely): ${remotePath}`);
 				try {
-					await pullFile(app, settings, syncFolder, remotePath, result, "created");
+					const pulled = await pullFile(app, settings, syncFolder, remotePath, result, "created");
 					fileStates[remotePath] = {
 						remoteSyncedAt: remoteEntry.updatedAt,
 						localModifiedAt: Date.now(),
 						status: "synced",
+						remoteHash: remoteEntry.hash,
+						localHash: pulled?.hash ?? remoteEntry.hash,
 					};
 				} catch (e) {
 					console.error(`Remote Vault Sync: re-pull failed for ${remotePath}`, e);
@@ -248,11 +265,37 @@ export async function performSync(
 		}
 
 		if (localFile) {
-			const remoteChanged = state
-				? remoteUpdatedAt > new Date(state.remoteSyncedAt).getTime()
-				: true; // no state = first sync, treat remote as authoritative unless locally changed
+			// Determine remote change using hash when available, fall back to timestamp
+			const remoteHash = remoteEntry.hash;
+			const hasHashes = !!remoteHash && !!state?.remoteHash;
+			const remoteChanged = hasHashes
+				? remoteHash !== state.remoteHash
+				: state
+					? remoteUpdatedAt > new Date(state.remoteSyncedAt).getTime()
+					: true; // no state = first sync
 
-			if (remoteChanged && isLocallyChanged) {
+			// Determine local change using hash when available, fall back to change queue
+			let localChanged = isLocallyChanged;
+			let localHash: string | undefined;
+			if (state?.localHash) {
+				const localContent = await app.vault.read(localFile);
+				localHash = await sha256(localContent);
+				localChanged = localHash !== state.localHash;
+			}
+
+			// If both sides have hashes and they match, content is identical — skip
+			if (remoteHash && localHash && remoteHash === localHash) {
+				fileStates[remotePath] = {
+					remoteSyncedAt: remoteEntry.updatedAt,
+					localModifiedAt: localFile.stat.mtime,
+					status: "synced",
+					remoteHash,
+					localHash,
+				};
+				continue;
+			}
+
+			if (remoteChanged && localChanged) {
 				// Both changed — conflict
 				onProgress?.(`Conflict: ${remotePath}`);
 				try {
@@ -261,35 +304,41 @@ export async function performSync(
 						remoteSyncedAt: remoteEntry.updatedAt,
 						localModifiedAt: localFile.stat.mtime,
 						status: "conflicted",
+						remoteHash,
 					};
 					result.conflicts++;
 				} catch (e) {
 					console.error(`Remote Vault Sync: conflict handling failed for ${remotePath}`, e);
 					result.errors++;
 				}
-			} else if (remoteChanged && !isLocallyChanged) {
+			} else if (remoteChanged && !localChanged) {
 				// Remote changed, local untouched — pull
 				onProgress?.(`Pulling: ${remotePath}`);
 				try {
-					await pullFile(app, settings, syncFolder, remotePath, result, "updated");
+					const pulled = await pullFile(app, settings, syncFolder, remotePath, result, "updated");
 					fileStates[remotePath] = {
 						remoteSyncedAt: remoteEntry.updatedAt,
 						localModifiedAt: Date.now(),
 						status: "synced",
+						remoteHash,
+						localHash: pulled?.hash ?? remoteHash,
 					};
 				} catch (e) {
 					console.error(`Remote Vault Sync: pull failed for ${remotePath}`, e);
 					result.errors++;
 				}
-			} else if (!remoteChanged && isLocallyChanged) {
+			} else if (!remoteChanged && localChanged) {
 				// Local changed, remote untouched — push
 				onProgress?.(`Pushing: ${remotePath}`);
 				try {
+					const pushHash = localHash ?? await sha256(await app.vault.read(localFile));
 					await pushFile(app, settings, syncFolder, remotePath, localFile);
 					fileStates[remotePath] = {
 						remoteSyncedAt: new Date().toISOString(),
 						localModifiedAt: localFile.stat.mtime,
 						status: "synced",
+						remoteHash: pushHash,
+						localHash: pushHash,
 					};
 					result.pushed++;
 				} catch (e) {
@@ -297,13 +346,23 @@ export async function performSync(
 					result.errors++;
 				}
 			} else {
-				// Neither changed — ensure state exists
+				// Neither changed — ensure state exists with hashes
 				if (!state) {
+					const content = await app.vault.read(localFile);
+					const h = await sha256(content);
 					fileStates[remotePath] = {
 						remoteSyncedAt: remoteEntry.updatedAt,
 						localModifiedAt: localFile.stat.mtime,
 						status: "synced",
+						remoteHash: remoteHash ?? h,
+						localHash: h,
 					};
+				} else if (!state.remoteHash || !state.localHash) {
+					// Backfill hashes on existing state
+					const content = await app.vault.read(localFile);
+					const h = await sha256(content);
+					state.remoteHash = remoteHash ?? state.remoteHash ?? h;
+					state.localHash = state.localHash ?? h;
 				}
 			}
 		}
@@ -342,11 +401,15 @@ export async function performSync(
 			// New local file, doesn't exist on server — push
 			onProgress?.(`Pushing new: ${relPath}`);
 			try {
+				const content = await app.vault.read(localFile);
+				const h = await sha256(content);
 				await pushFile(app, settings, syncFolder, relPath, localFile);
 				fileStates[relPath] = {
 					remoteSyncedAt: new Date().toISOString(),
 					localModifiedAt: localFile.stat.mtime,
 					status: "synced",
+					remoteHash: h,
+					localHash: h,
 				};
 				result.pushed++;
 			} catch (e) {
@@ -379,6 +442,7 @@ export async function performSync(
 
 /**
  * Pull a single file from the remote server and write it locally.
+ * Returns { hash } with the content hash for state tracking.
  */
 async function pullFile(
 	app: App,
@@ -387,12 +451,14 @@ async function pullFile(
 	remotePath: string,
 	result: SyncResult,
 	countField: "created" | "updated"
-): Promise<void> {
+): Promise<{ hash: string } | null> {
 	const file = await readFile(
 		settings.apiUrl,
 		settings.apiToken,
 		remotePath
 	);
+
+	if (!file) return null; // 304 not modified
 
 	const localPath = normalizePath(`${syncFolder}/${remotePath}`);
 	const parentPath = localPath.substring(0, localPath.lastIndexOf("/"));
@@ -408,6 +474,9 @@ async function pullFile(
 		await app.vault.create(localPath, file.content);
 		result[countField]++;
 	}
+
+	const hash = file.hash ?? await sha256(file.content);
+	return { hash };
 }
 
 /**
@@ -446,6 +515,10 @@ async function createConflict(
 		settings.apiToken,
 		remotePath
 	);
+	if (!remoteFile) {
+		// 304 should never happen here (no etag passed), but guard anyway
+		return;
+	}
 
 	// Create the conflict file with remote content
 	const conflictRelPath = toConflictPath(remotePath);
@@ -580,6 +653,16 @@ export async function resolveConflicts(
 		}
 	}
 	return resolved;
+}
+
+// --- Hash utilities ---
+
+async function sha256(content: string): Promise<string> {
+	const data = new TextEncoder().encode(content);
+	const buf = await crypto.subtle.digest("SHA-256", data);
+	return Array.from(new Uint8Array(buf))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
 }
 
 // --- Utility functions ---
