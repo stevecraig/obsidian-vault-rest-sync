@@ -482,6 +482,8 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			if (result.updated > 0) parts.push(`${result.updated} updated`);
 			if (result.pushed > 0) parts.push(`${result.pushed} pushed`);
 			if (result.deleted > 0) parts.push(`${result.deleted} deleted`);
+			if (result.autoMerged > 0)
+				parts.push(`${result.autoMerged} auto-merged`);
 			if (result.conflicts > 0)
 				parts.push(`${result.conflicts} conflicts`);
 			if (result.errors > 0) parts.push(`${result.errors} errors`);
