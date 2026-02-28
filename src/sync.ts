@@ -16,6 +16,16 @@ export type FileSyncStatus =
 	| "pendingPush"
 	| "pendingPull";
 
+/** Max file size (in bytes) for caching ancestor content (500 KB) */
+const ANCESTOR_MAX_BYTES = 500 * 1024;
+
+/** Return the content if it fits within the ancestor size limit, otherwise undefined. */
+function sizedAncestor(content: string): string | undefined {
+	return new TextEncoder().encode(content).byteLength <= ANCESTOR_MAX_BYTES
+		? content
+		: undefined;
+}
+
 /** Per-file sync state stored in plugin data */
 export interface FileSyncState {
 	remoteSyncedAt: string;
@@ -25,6 +35,8 @@ export interface FileSyncState {
 	remoteHash?: string;
 	/** SHA-256 hash of local content at last sync */
 	localHash?: string;
+	/** Content at last successful sync point, for future 3-way merge */
+	ancestorContent?: string;
 }
 
 /** The full sync state stored in plugin data.files */
@@ -212,6 +224,7 @@ export async function performSync(
 					status: "synced",
 					remoteHash: remoteEntry.hash,
 					localHash: pulled?.hash ?? remoteEntry.hash,
+					ancestorContent: pulled ? sizedAncestor(pulled.content) : undefined,
 				};
 			} catch (e) {
 				console.error(`Remote Vault Sync: pull failed for ${remotePath}`, e);
@@ -238,6 +251,7 @@ export async function performSync(
 						status: "synced",
 						remoteHash: remoteEntry.hash,
 						localHash: pulled?.hash ?? remoteEntry.hash,
+						ancestorContent: pulled ? sizedAncestor(pulled.content) : undefined,
 					};
 				} catch (e) {
 					console.error(`Remote Vault Sync: re-pull failed for ${remotePath}`, e);
@@ -277,8 +291,9 @@ export async function performSync(
 			// Determine local change using hash when available, fall back to change queue
 			let localChanged = isLocallyChanged;
 			let localHash: string | undefined;
+			let localContent: string | undefined;
 			if (state?.localHash) {
-				const localContent = await app.vault.read(localFile);
+				localContent = await app.vault.read(localFile);
 				localHash = await sha256(localContent);
 				localChanged = localHash !== state.localHash;
 			}
@@ -291,6 +306,7 @@ export async function performSync(
 					status: "synced",
 					remoteHash,
 					localHash,
+					ancestorContent: localContent ? sizedAncestor(localContent) : undefined,
 				};
 				continue;
 			}
@@ -322,6 +338,7 @@ export async function performSync(
 						status: "synced",
 						remoteHash,
 						localHash: pulled?.hash ?? remoteHash,
+						ancestorContent: pulled ? sizedAncestor(pulled.content) : undefined,
 					};
 				} catch (e) {
 					console.error(`Remote Vault Sync: pull failed for ${remotePath}`, e);
@@ -331,7 +348,8 @@ export async function performSync(
 				// Local changed, remote untouched — push
 				onProgress?.(`Pushing: ${remotePath}`);
 				try {
-					const pushHash = localHash ?? await sha256(await app.vault.read(localFile));
+					const pushContent = localContent ?? await app.vault.read(localFile);
+					const pushHash = localHash ?? await sha256(pushContent);
 					await pushFile(app, settings, syncFolder, remotePath, localFile);
 					fileStates[remotePath] = {
 						remoteSyncedAt: new Date().toISOString(),
@@ -339,6 +357,7 @@ export async function performSync(
 						status: "synced",
 						remoteHash: pushHash,
 						localHash: pushHash,
+						ancestorContent: sizedAncestor(pushContent),
 					};
 					result.pushed++;
 				} catch (e) {
@@ -356,6 +375,7 @@ export async function performSync(
 						status: "synced",
 						remoteHash: remoteHash ?? h,
 						localHash: h,
+						ancestorContent: sizedAncestor(content),
 					};
 				} else if (!state.remoteHash || !state.localHash) {
 					// Backfill hashes on existing state
@@ -363,6 +383,10 @@ export async function performSync(
 					const h = await sha256(content);
 					state.remoteHash = remoteHash ?? state.remoteHash ?? h;
 					state.localHash = state.localHash ?? h;
+					// Backfill ancestor if not already cached
+					if (state.ancestorContent === undefined) {
+						state.ancestorContent = sizedAncestor(content);
+					}
 				}
 			}
 		}
@@ -410,6 +434,7 @@ export async function performSync(
 					status: "synced",
 					remoteHash: h,
 					localHash: h,
+					ancestorContent: sizedAncestor(content),
 				};
 				result.pushed++;
 			} catch (e) {
@@ -442,7 +467,7 @@ export async function performSync(
 
 /**
  * Pull a single file from the remote server and write it locally.
- * Returns { hash } with the content hash for state tracking.
+ * Returns { hash, content } with the content hash and body for state tracking.
  */
 async function pullFile(
 	app: App,
@@ -451,7 +476,7 @@ async function pullFile(
 	remotePath: string,
 	result: SyncResult,
 	countField: "created" | "updated"
-): Promise<{ hash: string } | null> {
+): Promise<{ hash: string; content: string } | null> {
 	const file = await readFile(
 		settings.apiUrl,
 		settings.apiToken,
@@ -476,7 +501,7 @@ async function pullFile(
 	}
 
 	const hash = file.hash ?? await sha256(file.content);
-	return { hash };
+	return { hash, content: file.content };
 }
 
 /**
@@ -614,6 +639,7 @@ export function checkConflictResolved(
 /**
  * Resolve conflicts that have been manually handled (conflict file deleted).
  * Strips the conflict banner from the local file and updates status.
+ * Sets ancestor content to the resolved version for future 3-way merge.
  */
 export async function resolveConflicts(
 	app: App,
@@ -641,6 +667,9 @@ export async function resolveConflicts(
 				) {
 					const cleaned = content.slice(bannerEnd + 2);
 					await app.vault.modify(localFile, cleaned);
+					state.ancestorContent = sizedAncestor(cleaned);
+				} else {
+					state.ancestorContent = sizedAncestor(content);
 				}
 				state.status = "synced";
 				state.localModifiedAt = Date.now();
@@ -657,7 +686,7 @@ export async function resolveConflicts(
 
 // --- Hash utilities ---
 
-async function sha256(content: string): Promise<string> {
+export async function sha256(content: string): Promise<string> {
 	const data = new TextEncoder().encode(content);
 	const buf = await crypto.subtle.digest("SHA-256", data);
 	return Array.from(new Uint8Array(buf))
