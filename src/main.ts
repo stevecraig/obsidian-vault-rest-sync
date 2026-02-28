@@ -212,6 +212,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		this.syncing = true;
 		this.updateStatusBar(true);
 
+		let changes: LocalChange[] = [];
 		try {
 			// Check for resolved conflicts before syncing
 			const syncFolder = normalizePath(this.settings.syncFolder);
@@ -225,7 +226,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			}
 
 			// Drain the local change queue
-			const changes = [...this.localChanges];
+			changes = [...this.localChanges];
 			this.localChanges = [];
 
 			const { result, newLastSync, fileStates } = await performSync(
@@ -259,9 +260,9 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			console.error("Remote Vault Sync: sync failed", e);
 			new Notice(`Remote Vault Sync failed: ${msg}`);
 
-			// Re-queue changes that weren't processed
-			// (they were drained but sync failed, so they're lost — acceptable
-			// since next sync will do a full diff anyway)
+			// Restore un-processed changes — prepend failed batch before any new
+			// changes that arrived during sync to preserve ordering
+			this.localChanges = [...changes, ...this.localChanges];
 		} finally {
 			this.syncing = false;
 			this.updateStatusBar();
