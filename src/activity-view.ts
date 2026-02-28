@@ -58,34 +58,31 @@ export class SyncActivityView extends ItemView {
 			clearInterval(this.countdownTimer);
 			this.countdownTimer = null;
 		}
+		// Only remove shared style if no other activity views are open
 		if (this.styleEl) {
-			this.styleEl.remove();
+			const otherViews = this.app.workspace.getLeavesOfType(VIEW_TYPE_SYNC_ACTIVITY)
+				.filter((l) => l.view !== this);
+			if (otherViews.length === 0) {
+				this.styleEl.remove();
+			}
 			this.styleEl = null;
 		}
 	}
 
 	/**
-	 * Update the view with new event data.
+	 * Batch-update all view data and render once.
 	 */
-	setEvents(events: SyncEvent[]): void {
-		this.events = events;
+	update(data: {
+		events: SyncEvent[];
+		syncFolder: string;
+		lastSync: string | null;
+		nextSyncSeconds: number | null;
+	}): void {
+		this.events = data.events;
+		this.syncFolder = data.syncFolder;
+		this.lastSyncTime = data.lastSync;
+		this.nextSyncSeconds = data.nextSyncSeconds;
 		this.render();
-	}
-
-	/**
-	 * Update sync timing info for the footer.
-	 */
-	setSyncTiming(lastSync: string | null, nextSyncSeconds: number | null): void {
-		this.lastSyncTime = lastSync;
-		this.nextSyncSeconds = nextSyncSeconds;
-		this.render();
-	}
-
-	/**
-	 * Set the sync folder path for opening files.
-	 */
-	setSyncFolder(folder: string): void {
-		this.syncFolder = folder;
 	}
 
 	/**
@@ -270,7 +267,12 @@ export class SyncActivityView extends ItemView {
 	 * Inject styles for the activity feed.
 	 */
 	private injectStyles(): void {
-		if (this.styleEl) return;
+		// Reuse existing shared style element if present
+		const existing = document.getElementById("rvs-activity-styles") as HTMLStyleElement | null;
+		if (existing) {
+			this.styleEl = existing;
+			return;
+		}
 
 		this.styleEl = document.createElement("style");
 		this.styleEl.id = "rvs-activity-styles";

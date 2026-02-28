@@ -481,6 +481,14 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		try {
 			// Check for resolved conflicts before syncing
 			const syncFolder = normalizePath(this.settings.syncFolder);
+
+			// Snapshot conflicted paths so we can detect resolutions
+			const conflictedBefore = new Set(
+				Object.entries(this.fileStates)
+					.filter(([, s]) => s.status === "conflicted")
+					.map(([p]) => p)
+			);
+
 			const resolved = await resolveConflicts(
 				this.app,
 				syncFolder,
@@ -491,9 +499,8 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 
 			// Emit resolved events for conflicts resolved before this cycle
 			if (resolved > 0) {
-				// Find which files were just resolved by checking current state
-				for (const [path, state] of Object.entries(this.fileStates)) {
-					if (state.status === "synced" && state.localModifiedAt === Date.now()) {
+				for (const path of conflictedBefore) {
+					if (this.fileStates[path]?.status === "synced") {
 						this.activityEvents.push({
 							type: "resolved",
 							path,
@@ -587,9 +594,12 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		for (const leaf of leaves) {
 			const view = leaf.view;
 			if (view instanceof SyncActivityView) {
-				view.setSyncFolder(this.settings.syncFolder);
-				view.setEvents(this.activityEvents);
-				view.setSyncTiming(this.lastSync, nextSyncSeconds);
+				view.update({
+					events: this.activityEvents,
+					syncFolder: this.settings.syncFolder,
+					lastSync: this.lastSync,
+					nextSyncSeconds,
+				});
 			}
 		}
 	}
