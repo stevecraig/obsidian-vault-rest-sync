@@ -12,6 +12,7 @@ import {
 	SyncStateMap,
 	LocalChange,
 } from "./sync";
+import { SyncDecorator } from "./decorations";
 
 interface PluginData {
 	settings: RemoteVaultSyncSettings;
@@ -27,6 +28,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 	private syncing = false;
 	private localChanges: LocalChange[] = [];
 	private statusBarEl: HTMLElement | null = null;
+	private decorator: SyncDecorator | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -42,6 +44,11 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		// Status bar
 		this.statusBarEl = this.addStatusBarItem();
 		this.updateStatusBar();
+
+		// File explorer sync status badges
+		this.decorator = new SyncDecorator(this, this.settings.syncFolder);
+		this.decorator.register();
+		this.refreshDecorations();
 
 		// Register vault event listeners for local change tracking
 		this.registerEvent(
@@ -77,6 +84,10 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 
 	onunload(): void {
 		this.stopSyncInterval();
+		if (this.decorator) {
+			this.decorator.destroy();
+			this.decorator = null;
+		}
 	}
 
 	async loadSettings(): Promise<void> {
@@ -119,6 +130,18 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 	}
 
 	/**
+	 * Push current sync state and change queue into the file explorer decorator.
+	 */
+	private refreshDecorations(): void {
+		if (!this.decorator) return;
+		this.decorator.setSyncFolder(this.settings.syncFolder);
+		const queuePaths = this.localChanges
+			.filter((c) => c.type !== "delete")
+			.map((c) => c.path);
+		this.decorator.updateDecorations(this.fileStates, queuePaths);
+	}
+
+	/**
 	 * Track a local file change (create, modify, delete).
 	 * Only tracks changes within the sync folder, ignoring .conflict.md files.
 	 */
@@ -136,6 +159,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		if (isConflictFile(relPath)) return;
 
 		this.localChanges.push({ type, path: file.path });
+		this.refreshDecorations();
 	}
 
 	/**
@@ -173,6 +197,8 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			if (isConflictFile(newRel)) return;
 			this.localChanges.push({ type: "create", path: file.path });
 		}
+
+		this.refreshDecorations();
 	}
 
 	/**
@@ -266,6 +292,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		} finally {
 			this.syncing = false;
 			this.updateStatusBar();
+			this.refreshDecorations();
 		}
 	}
 }
