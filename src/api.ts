@@ -85,7 +85,7 @@ export async function readFile(
 	path: string,
 	etag?: string
 ): Promise<FileContent | null> {
-	const url = `${baseUrl.replace(/\/+$/, "")}/${encodeURI(path)}`;
+	const url = `${baseUrl.replace(/\/+$/, "")}/${encodeURI(path)}?format=json`;
 	const h = headers(token);
 	if (etag) {
 		h["If-None-Match"] = `"${etag}"`;

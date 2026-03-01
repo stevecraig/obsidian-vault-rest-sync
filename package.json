@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-remote-vault-sync",
-	"version": "2.0.1",
+	"version": "2.0.2",
 	"description": "Obsidian plugin to sync files from a remote REST API",
 	"main": "main.js",
 	"scripts": {
