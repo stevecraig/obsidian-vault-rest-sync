@@ -69,7 +69,10 @@ export async function listFiles(
 	});
 
 	handleResponse(response);
-	return response.json as FileListEntry[];
+	// Handle both paginated { results: [...], total: N } and legacy raw array
+	const data = response.json;
+	const entries = Array.isArray(data) ? data : data.results;
+	return entries as FileListEntry[];
 }
 
 /**
