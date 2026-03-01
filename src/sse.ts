@@ -7,6 +7,10 @@
  *
  * Reconnects automatically with exponential backoff, passing
  * Last-Event-ID to replay missed events.
+ *
+ * Supports adaptive idle disconnect: the client can be paused after
+ * a configurable period of no incoming events or no user activity,
+ * and resumed instantly on demand.
  */
 
 export interface SSEFileEvent {
@@ -33,6 +37,12 @@ export interface SSEClientOptions {
 	onError?: (error: Error) => void;
 	/** Maximum reconnect delay in ms (default: 30000) */
 	reconnectMaxMs?: number;
+	/** Minutes of no SSE events before idle disconnect (0 = disabled) */
+	eventIdleMinutes?: number;
+	/** Minutes of no user activity before idle disconnect (0 = disabled) */
+	userIdleMinutes?: number;
+	/** Called when the connection is paused due to idle timeout */
+	onIdlePause?: (reason: "event-idle" | "user-idle") => void;
 }
 
 export class SSEClient {
@@ -43,14 +53,25 @@ export class SSEClient {
 	private onConnected?: () => void;
 	private onDisconnected?: () => void;
 	private onError?: (error: Error) => void;
+	private onIdlePause?: (reason: "event-idle" | "user-idle") => void;
 
 	private reconnectMaxMs: number;
+	private eventIdleMs: number;
+	private userIdleMs: number;
 	private lastEventId: string | null = null;
 	private abortController: AbortController | null = null;
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private reconnectAttempt = 0;
 	private stopped = false;
 	private _connected = false;
+
+	/** Whether the client is in idle-paused state (stopped but resumable) */
+	private _idlePaused = false;
+
+	/** Timer that fires when no SSE events arrive for eventIdleMs */
+	private eventIdleTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Timer that fires when no user activity for userIdleMs */
+	private userIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(options: SSEClientOptions) {
 		this.url = options.url;
@@ -60,7 +81,10 @@ export class SSEClient {
 		this.onConnected = options.onConnected;
 		this.onDisconnected = options.onDisconnected;
 		this.onError = options.onError;
+		this.onIdlePause = options.onIdlePause;
 		this.reconnectMaxMs = options.reconnectMaxMs ?? 30000;
+		this.eventIdleMs = (options.eventIdleMinutes ?? 0) * 60 * 1000;
+		this.userIdleMs = (options.userIdleMinutes ?? 0) * 60 * 1000;
 	}
 
 	/** Whether the SSE connection is currently active */
@@ -68,16 +92,24 @@ export class SSEClient {
 		return this._connected;
 	}
 
+	/** Whether the client is paused due to idle timeout */
+	get idlePaused(): boolean {
+		return this._idlePaused;
+	}
+
 	/** Start the SSE connection */
 	start(): void {
 		this.stopped = false;
+		this._idlePaused = false;
 		this.connect();
+		this.resetUserIdleTimer();
 	}
 
 	/** Stop the SSE connection and cancel any pending reconnect */
 	stop(): void {
 		this.stopped = true;
 		this._connected = false;
+		this._idlePaused = false;
 		if (this.abortController) {
 			this.abortController.abort();
 			this.abortController = null;
@@ -86,6 +118,7 @@ export class SSEClient {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
+		this.clearIdleTimers();
 	}
 
 	/** Reconnect with new URL/token (e.g. after settings change) */
@@ -98,8 +131,95 @@ export class SSEClient {
 		this.start();
 	}
 
+	/**
+	 * Signal user activity. Resets the user idle timer and
+	 * resumes the connection if it was idle-paused.
+	 */
+	notifyUserActivity(): void {
+		this.resetUserIdleTimer();
+
+		if (this._idlePaused) {
+			this.resume();
+		}
+	}
+
+	/**
+	 * Resume from idle-paused state. Reconnects immediately
+	 * without backoff.
+	 */
+	private resume(): void {
+		if (!this._idlePaused) return;
+		this._idlePaused = false;
+		this.stopped = false;
+		this.reconnectAttempt = 0;
+		this.connect();
+	}
+
+	/**
+	 * Pause the connection due to idle timeout. Disconnects
+	 * but stays resumable (not fully stopped).
+	 */
+	private idlePause(reason: "event-idle" | "user-idle"): void {
+		if (this.stopped || this._idlePaused) return;
+		this._idlePaused = true;
+		this._connected = false;
+
+		if (this.abortController) {
+			this.abortController.abort();
+			this.abortController = null;
+		}
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+		this.clearIdleTimers();
+
+		this.onDisconnected?.();
+		this.onIdlePause?.(reason);
+	}
+
+	/** Reset the event idle timer (called on every incoming SSE event) */
+	private resetEventIdleTimer(): void {
+		if (this.eventIdleTimer) {
+			clearTimeout(this.eventIdleTimer);
+			this.eventIdleTimer = null;
+		}
+		if (this.eventIdleMs > 0 && this._connected) {
+			this.eventIdleTimer = setTimeout(() => {
+				this.eventIdleTimer = null;
+				this.idlePause("event-idle");
+			}, this.eventIdleMs);
+		}
+	}
+
+	/** Reset the user idle timer */
+	private resetUserIdleTimer(): void {
+		if (this.userIdleTimer) {
+			clearTimeout(this.userIdleTimer);
+			this.userIdleTimer = null;
+		}
+		if (this.userIdleMs > 0 && !this.stopped) {
+			this.userIdleTimer = setTimeout(() => {
+				this.userIdleTimer = null;
+				this.idlePause("user-idle");
+			}, this.userIdleMs);
+		}
+	}
+
+	/** Clear all idle timers */
+	private clearIdleTimers(): void {
+		if (this.eventIdleTimer) {
+			clearTimeout(this.eventIdleTimer);
+			this.eventIdleTimer = null;
+		}
+		if (this.userIdleTimer) {
+			clearTimeout(this.userIdleTimer);
+			this.userIdleTimer = null;
+		}
+	}
+
 	private connect(): void {
-		if (this.stopped) return;
+		if (this.stopped && !this._idlePaused) return;
 
 		this.abortController = new AbortController();
 		const headers: Record<string, string> = {
@@ -133,22 +253,25 @@ export class SSEClient {
 				this.reconnectAttempt = 0;
 				this.onConnected?.();
 
+				// Start event idle timer now that we're connected
+				this.resetEventIdleTimer();
+
 				return this.readStream(response.body);
 			})
 			.then(() => {
 				// Stream ended normally
-				if (!this.stopped) {
+				if (!this.stopped && !this._idlePaused) {
 					this._connected = false;
 					this.onDisconnected?.();
 					this.scheduleReconnect();
 				}
 			})
 			.catch((err: unknown) => {
-				if (this.stopped) return;
+				if (this.stopped || this._idlePaused) return;
 
 				this._connected = false;
 
-				// AbortError is expected when we call stop()
+				// AbortError is expected when we call stop() or idlePause()
 				if (err instanceof Error && err.name === "AbortError") return;
 
 				this.onDisconnected?.();
@@ -172,7 +295,7 @@ export class SSEClient {
 		try {
 			while (true) {
 				const { done, value } = await reader.read();
-				if (done || this.stopped) break;
+				if (done || this.stopped || this._idlePaused) break;
 
 				buffer += decoder.decode(value, { stream: true });
 
@@ -220,6 +343,23 @@ export class SSEClient {
 			this.lastEventId = id;
 		}
 
+		// Reset event idle timer on every incoming event
+		this.resetEventIdleTimer();
+
+		// Handle reconnect event — server is about to close the connection,
+		// reconnect immediately without backoff
+		if (eventType === "reconnect") {
+			this._connected = false;
+			if (this.abortController) {
+				this.abortController.abort();
+				this.abortController = null;
+			}
+			this.reconnectAttempt = 0;
+			// Don't fire onDisconnected — this is a seamless handover
+			this.connect();
+			return;
+		}
+
 		let parsed: SSEFileEvent;
 		try {
 			parsed = JSON.parse(data) as SSEFileEvent;
@@ -239,7 +379,7 @@ export class SSEClient {
 	}
 
 	private scheduleReconnect(): void {
-		if (this.stopped) return;
+		if (this.stopped || this._idlePaused) return;
 
 		// Exponential backoff: 1s, 2s, 4s, 8s... capped at reconnectMaxMs
 		const baseDelay = 1000;

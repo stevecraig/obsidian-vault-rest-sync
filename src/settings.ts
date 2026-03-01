@@ -10,6 +10,10 @@ export interface RemoteVaultSyncSettings {
 	enableSSE: boolean;
 	/** Maximum reconnect delay for SSE in milliseconds */
 	sseReconnectMaxMs: number;
+	/** Minutes of no incoming SSE events before disconnecting (default: 5) */
+	sseEventIdleMinutes: number;
+	/** Minutes of no user activity before disconnecting SSE (default: 15) */
+	sseUserIdleMinutes: number;
 }
 
 export const DEFAULT_SETTINGS: RemoteVaultSyncSettings = {
@@ -19,6 +23,8 @@ export const DEFAULT_SETTINGS: RemoteVaultSyncSettings = {
 	syncIntervalMinutes: 15,
 	enableSSE: true,
 	sseReconnectMaxMs: 30000,
+	sseEventIdleMinutes: 5,
+	sseUserIdleMinutes: 15,
 };
 
 export class RemoteVaultSyncSettingTab extends PluginSettingTab {
@@ -136,6 +142,50 @@ export class RemoteVaultSyncSettingTab extends PluginSettingTab {
 						if (!isNaN(num) && num >= 5) {
 							this.plugin.settings.sseReconnectMaxMs =
 								num * 1000;
+							await this.plugin.saveSettings();
+							this.plugin.restartSSE();
+						}
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Event idle timeout")
+			.setDesc(
+				"Minutes with no incoming SSE events before disconnecting. " +
+				"The connection will resume automatically on user activity."
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("5")
+					.setValue(
+						String(this.plugin.settings.sseEventIdleMinutes)
+					)
+					.onChange(async (value) => {
+						const num = parseInt(value, 10);
+						if (!isNaN(num) && num >= 1) {
+							this.plugin.settings.sseEventIdleMinutes = num;
+							await this.plugin.saveSettings();
+							this.plugin.restartSSE();
+						}
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("User idle timeout")
+			.setDesc(
+				"Minutes with no user activity before disconnecting SSE. " +
+				"Activity includes editing files, switching tabs, and focusing the window."
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("15")
+					.setValue(
+						String(this.plugin.settings.sseUserIdleMinutes)
+					)
+					.onChange(async (value) => {
+						const num = parseInt(value, 10);
+						if (!isNaN(num) && num >= 1) {
+							this.plugin.settings.sseUserIdleMinutes = num;
 							await this.plugin.saveSettings();
 							this.plugin.restartSSE();
 						}

@@ -78,8 +78,12 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 	private sseClient: SSEClient | null = null;
 	/** Whether SSE is currently connected (used to lengthen poll interval) */
 	private sseConnected = false;
+	/** Whether SSE is idle-paused (disconnected due to inactivity) */
+	private sseIdlePaused = false;
 	/** Timestamp (ms) when the current sync interval started */
 	private syncIntervalStartedAt: number = 0;
+	/** Bound handler for window focus events (needed for removeEventListener) */
+	private focusHandler: (() => void) | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -146,6 +150,8 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on("modify", (file: TAbstractFile) => {
 				this.onLocalChange("modify", file);
+				// User editing a file counts as activity — wake SSE if idle
+				this.signalUserActivity();
 			})
 		);
 		this.registerEvent(
@@ -158,6 +164,17 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 				this.onLocalRename(file, oldPath);
 			})
 		);
+
+		// Track workspace activity — switching tabs signals user presence
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", () => {
+				this.signalUserActivity();
+			})
+		);
+
+		// Track window focus — regaining focus signals user presence
+		this.focusHandler = () => this.signalUserActivity();
+		window.addEventListener("focus", this.focusHandler);
 
 		// Start auto-sync interval
 		this.startSyncInterval();
@@ -179,6 +196,10 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			this.decorator = null;
 		}
 		this.stopSSE();
+		if (this.focusHandler) {
+			window.removeEventListener("focus", this.focusHandler);
+			this.focusHandler = null;
+		}
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_SYNC_ACTIVITY);
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_CONFLICT_DASHBOARD);
 	}
@@ -251,12 +272,15 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			url: eventsUrl,
 			token: this.settings.apiToken,
 			reconnectMaxMs: this.settings.sseReconnectMaxMs,
+			eventIdleMinutes: this.settings.sseEventIdleMinutes,
+			userIdleMinutes: this.settings.sseUserIdleMinutes,
 			onFileChanged: (event: SSEFileEvent) =>
 				this.onSSEFileChanged(event),
 			onFileDeleted: (event: SSEFileEvent) =>
 				this.onSSEFileDeleted(event),
 			onConnected: () => {
 				this.sseConnected = true;
+				this.sseIdlePaused = false;
 				this.updateStatusBar();
 				// Lengthen polling interval while SSE is active
 				this.startSyncInterval();
@@ -272,6 +296,15 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			onError: (err: Error) => {
 				console.error("Remote Vault Sync: SSE error", err);
 			},
+			onIdlePause: (reason: "event-idle" | "user-idle") => {
+				this.sseIdlePaused = true;
+				this.sseConnected = false;
+				this.updateStatusBar();
+				this.startSyncInterval();
+				console.log(
+					`Remote Vault Sync: SSE paused (${reason}), will resume on activity`
+				);
+			},
 		});
 
 		this.sseClient.start();
@@ -284,11 +317,22 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			this.sseClient = null;
 		}
 		this.sseConnected = false;
+		this.sseIdlePaused = false;
 	}
 
 	/** Restart SSE (called from settings changes) */
 	restartSSE(): void {
 		this.startSSE();
+	}
+
+	/**
+	 * Signal user activity to the SSE client. This resets idle timers
+	 * and resumes the connection if it was idle-paused.
+	 */
+	private signalUserActivity(): void {
+		if (this.sseClient) {
+			this.sseClient.notifyUserActivity();
+		}
 	}
 
 	/**
@@ -488,9 +532,14 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			);
 			this.statusBarEl.style.cursor = "pointer";
 		} else {
-			const liveIndicator = this.sseConnected ? " [live]" : "";
+			let indicator = "";
+			if (this.sseConnected) {
+				indicator = " [live]";
+			} else if (this.sseIdlePaused) {
+				indicator = " [idle]";
+			}
 			this.statusBarEl.setText(
-				`Remote Vault: synced${liveIndicator}`
+				`Remote Vault: synced${indicator}`
 			);
 			this.statusBarEl.style.cursor = "default";
 		}
@@ -508,6 +557,9 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			);
 			return;
 		}
+
+		// Sync trigger counts as user activity — wake SSE if idle
+		this.signalUserActivity();
 
 		this.syncing = true;
 		this.updateStatusBar(true);
