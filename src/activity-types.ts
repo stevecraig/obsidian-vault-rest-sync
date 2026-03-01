@@ -21,6 +21,8 @@ export interface SyncEvent {
 	timestamp: string;
 	/** Sync cycle ID — events with the same cycleId are grouped together */
 	cycleId: string;
+	/** Origin of the change — local (user edit) or remote (MCP/AI/other device) */
+	origin?: "local" | "remote";
 }
 
 /** Maximum number of events to persist */

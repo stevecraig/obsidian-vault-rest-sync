@@ -193,6 +193,14 @@ export class SyncActivityView extends ItemView {
 			text: EVENT_LABELS[event.type],
 			cls: `rvs-activity-label rvs-label-${event.type}`,
 		});
+
+		// Origin indicator
+		if (event.origin) {
+			row.createSpan({
+				text: event.origin === "remote" ? "MCP" : "local",
+				cls: `rvs-activity-origin rvs-origin-${event.origin}`,
+			});
+		}
 	}
 
 	/**
@@ -417,6 +425,27 @@ export class SyncActivityView extends ItemView {
 
 .rvs-activity-footer-next {
 	opacity: 0.7;
+}
+
+.rvs-activity-origin {
+	flex-shrink: 0;
+	font-size: 0.7em;
+	padding: 1px 5px;
+	border-radius: 3px;
+	font-weight: 500;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+}
+
+.rvs-origin-remote {
+	background: var(--text-accent);
+	color: var(--background-primary);
+	opacity: 0.85;
+}
+
+.rvs-origin-local {
+	background: var(--background-modifier-border);
+	color: var(--text-muted);
 }
 `;
 		document.head.appendChild(this.styleEl);
