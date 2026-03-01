@@ -25,6 +25,10 @@ import {
 	SyncActivityView,
 	VIEW_TYPE_SYNC_ACTIVITY,
 } from "./activity-view";
+import {
+	gatherConflicts,
+	showConflictModals,
+} from "./conflict-ui";
 
 interface PluginData {
 	settings: RemoteVaultSyncSettings;
@@ -94,6 +98,12 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			id: "view-activity",
 			name: "View activity",
 			callback: () => this.openActivityView(),
+		});
+
+		this.addCommand({
+			id: "resolve-conflicts",
+			name: "Resolve conflicts",
+			callback: () => this.showConflictResolution(),
 		});
 
 		// Status bar
@@ -552,6 +562,37 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			} else {
 				new Notice(`Remote Vault Sync: ${parts.join(", ")}`);
 			}
+
+			// Show conflict resolution modals if there are unresolved conflicts
+			if (result.conflicts > 0) {
+				const conflictInfos = gatherConflicts(
+					this.app,
+					this.settings.syncFolder,
+					this.fileStates
+				);
+				if (conflictInfos.length > 0) {
+					// Run modals after releasing the sync lock so the UI is responsive
+					const modalCallbacks = {
+						apiUrl: this.settings.apiUrl,
+						apiToken: this.settings.apiToken,
+						syncFolder: normalizePath(this.settings.syncFolder),
+						fileStates: this.fileStates,
+						saveSettings: () => this.saveSettings(),
+						onResolved: (_remotePath: string, event: SyncEvent) => {
+							this.activityEvents = trimEvents([
+								...this.activityEvents,
+								event,
+							]);
+							this.refreshActivityView();
+							this.updateStatusBar();
+							this.refreshDecorations();
+						},
+					};
+					setTimeout(() => {
+						showConflictModals(this.app, conflictInfos, modalCallbacks);
+					}, 200);
+				}
+			}
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : "Unknown error";
 			console.error("Remote Vault Sync: sync failed", e);
@@ -565,6 +606,47 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			this.updateStatusBar();
 			this.refreshDecorations();
 		}
+	}
+
+	/**
+	 * Show conflict resolution modals for all current conflicts.
+	 * Can be triggered manually via the command palette.
+	 */
+	private showConflictResolution(): void {
+		if (!this.settings.apiUrl || !this.settings.apiToken) {
+			new Notice(
+				"Remote Vault Sync: configure API URL and token in settings"
+			);
+			return;
+		}
+
+		const conflictInfos = gatherConflicts(
+			this.app,
+			this.settings.syncFolder,
+			this.fileStates
+		);
+
+		if (conflictInfos.length === 0) {
+			new Notice("Remote Vault Sync: no conflicts to resolve");
+			return;
+		}
+
+		showConflictModals(this.app, conflictInfos, {
+			apiUrl: this.settings.apiUrl,
+			apiToken: this.settings.apiToken,
+			syncFolder: normalizePath(this.settings.syncFolder),
+			fileStates: this.fileStates,
+			saveSettings: () => this.saveSettings(),
+			onResolved: (_remotePath: string, event: SyncEvent) => {
+				this.activityEvents = trimEvents([
+					...this.activityEvents,
+					event,
+				]);
+				this.refreshActivityView();
+				this.updateStatusBar();
+				this.refreshDecorations();
+			},
+		});
 	}
 
 	/**
