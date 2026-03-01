@@ -102,8 +102,8 @@ export async function performSync(
 
 	const events: SyncEvent[] = [];
 	const cid = cycleId ?? "";
-	const emit = (type: SyncEventType, path: string): void => {
-		events.push({ type, path, timestamp: new Date().toISOString(), cycleId: cid });
+	const emit = (type: SyncEventType, path: string, origin?: "local" | "remote"): void => {
+		events.push({ type, path, timestamp: new Date().toISOString(), cycleId: cid, origin });
 	};
 
 	const syncFolder = normalizePath(settings.syncFolder);
@@ -194,7 +194,7 @@ export async function performSync(
 						remoteHash: remoteEntry.hash,
 					};
 					result.conflicts++;
-					emit("conflict", remotePath);
+					emit("conflict", remotePath, "remote");
 				} catch (e) {
 					console.error(`Remote Vault Sync: conflict re-pull failed for ${remotePath}`, e);
 					result.errors++;
@@ -210,7 +210,7 @@ export async function performSync(
 					);
 					if (deleted) {
 						result.deleted++;
-						emit("deleted", remotePath);
+						emit("deleted", remotePath, "local");
 					} else {
 						// Server doesn't support DELETE — can't sync this deletion
 						console.warn(
@@ -239,7 +239,7 @@ export async function performSync(
 					localHash: pulled?.hash ?? remoteEntry.hash,
 					ancestorContent: pulled ? sizedAncestor(pulled.content) : undefined,
 				};
-				emit("pulled", remotePath);
+				emit("pulled", remotePath, "remote");
 			} catch (e) {
 				console.error(`Remote Vault Sync: pull failed for ${remotePath}`, e);
 				result.errors++;
@@ -267,7 +267,7 @@ export async function performSync(
 						localHash: pulled?.hash ?? remoteEntry.hash,
 						ancestorContent: pulled ? sizedAncestor(pulled.content) : undefined,
 					};
-					emit("pulled", remotePath);
+					emit("pulled", remotePath, "remote");
 				} catch (e) {
 					console.error(`Remote Vault Sync: re-pull failed for ${remotePath}`, e);
 					result.errors++;
@@ -283,7 +283,7 @@ export async function performSync(
 					);
 					if (deleted) {
 						result.deleted++;
-						emit("deleted", remotePath);
+						emit("deleted", remotePath, "local");
 					}
 					delete fileStates[remotePath];
 				} catch (e) {
@@ -367,7 +367,7 @@ export async function performSync(
 										ancestorContent: sizedAncestor(mergeResult.merged),
 									};
 									result.autoMerged++;
-									emit("merged", remotePath);
+									emit("merged", remotePath, "remote");
 									merged = true;
 								}
 							}
@@ -389,7 +389,7 @@ export async function performSync(
 							remoteHash,
 						};
 						result.conflicts++;
-						emit("conflict", remotePath);
+						emit("conflict", remotePath, "remote");
 					} catch (e) {
 						console.error(`Remote Vault Sync: conflict handling failed for ${remotePath}`, e);
 						result.errors++;
@@ -408,7 +408,7 @@ export async function performSync(
 						localHash: pulled?.hash ?? remoteHash,
 						ancestorContent: pulled ? sizedAncestor(pulled.content) : undefined,
 					};
-					emit("pulled", remotePath);
+					emit("pulled", remotePath, "remote");
 				} catch (e) {
 					console.error(`Remote Vault Sync: pull failed for ${remotePath}`, e);
 					result.errors++;
@@ -429,7 +429,7 @@ export async function performSync(
 						ancestorContent: sizedAncestor(pushContent),
 					};
 					result.pushed++;
-					emit("pushed", remotePath);
+					emit("pushed", remotePath, "local");
 				} catch (e) {
 					console.error(`Remote Vault Sync: push failed for ${remotePath}`, e);
 					result.errors++;
@@ -479,7 +479,7 @@ export async function performSync(
 					status: "conflicted",
 				};
 				result.conflicts++;
-				emit("conflict", relPath);
+				emit("conflict", relPath, "remote");
 			} else {
 				// Local untouched, remote deleted — delete local
 				onProgress?.(`Deleting local (removed from server): ${relPath}`);
@@ -487,7 +487,7 @@ export async function performSync(
 					await app.vault.delete(localFile);
 					delete fileStates[relPath];
 					result.deleted++;
-					emit("deleted", relPath);
+					emit("deleted", relPath, "remote");
 				} catch (e) {
 					console.error(`Remote Vault Sync: local delete failed for ${relPath}`, e);
 					result.errors++;
@@ -509,7 +509,7 @@ export async function performSync(
 					ancestorContent: sizedAncestor(content),
 				};
 				result.pushed++;
-				emit("pushed", relPath);
+				emit("pushed", relPath, "local");
 			} catch (e) {
 				console.error(`Remote Vault Sync: push failed for ${relPath}`, e);
 				result.errors++;
