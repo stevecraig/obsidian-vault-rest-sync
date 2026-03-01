@@ -29,6 +29,10 @@ import {
 	gatherConflicts,
 	showConflictModals,
 } from "./conflict-ui";
+import {
+	ConflictDashboardView,
+	VIEW_TYPE_CONFLICT_DASHBOARD,
+} from "./conflict-dashboard";
 
 interface PluginData {
 	settings: RemoteVaultSyncSettings;
@@ -88,6 +92,12 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			(leaf) => new SyncActivityView(leaf)
 		);
 
+		// Register the conflict dashboard view
+		this.registerView(
+			VIEW_TYPE_CONFLICT_DASHBOARD,
+			(leaf) => new ConflictDashboardView(leaf)
+		);
+
 		this.addCommand({
 			id: "sync-now",
 			name: "Sync now",
@@ -106,8 +116,20 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			callback: () => this.showConflictResolution(),
 		});
 
-		// Status bar
+		this.addCommand({
+			id: "view-conflicts",
+			name: "View conflicts",
+			callback: () => this.openConflictDashboard(),
+		});
+
+		// Status bar (click opens conflict dashboard when conflicts exist)
 		this.statusBarEl = this.addStatusBarItem();
+		this.statusBarEl.addEventListener("click", () => {
+			const conflicts = countConflicts(this.fileStates);
+			if (conflicts > 0) {
+				this.openConflictDashboard();
+			}
+		});
 		this.updateStatusBar();
 
 		// File explorer sync status badges
@@ -158,6 +180,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 		}
 		this.stopSSE();
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_SYNC_ACTIVITY);
+		this.app.workspace.detachLeavesOfType(VIEW_TYPE_CONFLICT_DASHBOARD);
 	}
 
 	async loadSettings(): Promise<void> {
@@ -463,11 +486,13 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			this.statusBarEl.setText(
 				`Remote Vault: ${conflicts} conflict${conflicts === 1 ? "" : "s"}`
 			);
+			this.statusBarEl.style.cursor = "pointer";
 		} else {
 			const liveIndicator = this.sseConnected ? " [live]" : "";
 			this.statusBarEl.setText(
 				`Remote Vault: synced${liveIndicator}`
 			);
+			this.statusBarEl.style.cursor = "default";
 		}
 	}
 
@@ -563,6 +588,9 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 				new Notice(`Remote Vault Sync: ${parts.join(", ")}`);
 			}
 
+			// Refresh conflict dashboard after sync
+			this.refreshConflictDashboard();
+
 			// Show conflict resolution modals if there are unresolved conflicts
 			if (result.conflicts > 0) {
 				const conflictInfos = gatherConflicts(
@@ -572,22 +600,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 				);
 				if (conflictInfos.length > 0) {
 					// Run modals after releasing the sync lock so the UI is responsive
-					const modalCallbacks = {
-						apiUrl: this.settings.apiUrl,
-						apiToken: this.settings.apiToken,
-						syncFolder: normalizePath(this.settings.syncFolder),
-						fileStates: this.fileStates,
-						saveSettings: () => this.saveSettings(),
-						onResolved: (_remotePath: string, event: SyncEvent) => {
-							this.activityEvents = trimEvents([
-								...this.activityEvents,
-								event,
-							]);
-							this.refreshActivityView();
-							this.updateStatusBar();
-							this.refreshDecorations();
-						},
-					};
+					const modalCallbacks = this.buildConflictCallbacks();
 					setTimeout(() => {
 						showConflictModals(this.app, conflictInfos, modalCallbacks);
 					}, 200);
@@ -631,22 +644,7 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 			return;
 		}
 
-		showConflictModals(this.app, conflictInfos, {
-			apiUrl: this.settings.apiUrl,
-			apiToken: this.settings.apiToken,
-			syncFolder: normalizePath(this.settings.syncFolder),
-			fileStates: this.fileStates,
-			saveSettings: () => this.saveSettings(),
-			onResolved: (_remotePath: string, event: SyncEvent) => {
-				this.activityEvents = trimEvents([
-					...this.activityEvents,
-					event,
-				]);
-				this.refreshActivityView();
-				this.updateStatusBar();
-				this.refreshDecorations();
-			},
-		});
+		showConflictModals(this.app, conflictInfos, this.buildConflictCallbacks());
 	}
 
 	/**
@@ -686,6 +684,70 @@ export default class RemoteVaultSyncPlugin extends Plugin {
 				});
 			}
 		}
+	}
+
+	/**
+	 * Open or focus the conflict dashboard view.
+	 */
+	private async openConflictDashboard(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_CONFLICT_DASHBOARD);
+		if (existing.length > 0) {
+			this.app.workspace.revealLeaf(existing[0]);
+			this.refreshConflictDashboard();
+			return;
+		}
+
+		const leaf = this.app.workspace.getLeaf("tab");
+		await leaf.setViewState({
+			type: VIEW_TYPE_CONFLICT_DASHBOARD,
+			active: true,
+		});
+		this.app.workspace.revealLeaf(leaf);
+		this.refreshConflictDashboard();
+	}
+
+	/**
+	 * Refresh all open conflict dashboard views with current data.
+	 */
+	private refreshConflictDashboard(): void {
+		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CONFLICT_DASHBOARD);
+		if (leaves.length === 0) return;
+
+		const callbacks = this.buildConflictCallbacks();
+
+		for (const leaf of leaves) {
+			const view = leaf.view;
+			if (view instanceof ConflictDashboardView) {
+				view.update({
+					fileStates: this.fileStates,
+					syncFolder: this.settings.syncFolder,
+					callbacks,
+				});
+			}
+		}
+	}
+
+	/**
+	 * Build the ConflictCallbacks object for conflict resolution UIs.
+	 */
+	private buildConflictCallbacks(): import("./conflict-ui").ConflictCallbacks {
+		return {
+			apiUrl: this.settings.apiUrl,
+			apiToken: this.settings.apiToken,
+			syncFolder: normalizePath(this.settings.syncFolder),
+			fileStates: this.fileStates,
+			saveSettings: () => this.saveSettings(),
+			onResolved: (_remotePath: string, event: SyncEvent) => {
+				this.activityEvents = trimEvents([
+					...this.activityEvents,
+					event,
+				]);
+				this.refreshActivityView();
+				this.refreshConflictDashboard();
+				this.updateStatusBar();
+				this.refreshDecorations();
+			},
+		};
 	}
 
 	/**
