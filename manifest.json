@@ -1,7 +1,7 @@
 {
 	"id": "remote-vault-sync",
 	"name": "Remote Vault Sync",
-	"version": "2.0.1",
+	"version": "2.0.2",
 	"minAppVersion": "1.0.0",
 	"description": "Two-way sync between your vault and a remote REST API. Pull, push, and detect conflicts automatically.",
 	"author": "stevecraig",
