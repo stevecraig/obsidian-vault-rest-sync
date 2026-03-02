@@ -3,7 +3,6 @@ import {
 	listFiles,
 	readFile,
 	writeFile,
-	deleteFile,
 	FileListEntry,
 	ApiError,
 } from "./api";
@@ -200,28 +199,11 @@ export async function performSync(
 					result.errors++;
 				}
 			} else {
-				// Remote untouched — delete on server
-				onProgress?.(`Deleting remote: ${remotePath}`);
-				try {
-					const deleted = await deleteFile(
-						settings.apiUrl,
-						settings.apiToken,
-						remotePath
-					);
-					if (deleted) {
-						result.deleted++;
-						emit("deleted", remotePath, "local");
-					} else {
-						// Server doesn't support DELETE — can't sync this deletion
-						console.warn(
-							`Remote Vault Sync: server doesn't support DELETE for ${remotePath}`
-						);
-					}
-					delete fileStates[remotePath];
-				} catch (e) {
-					console.error(`Remote Vault Sync: delete failed for ${remotePath}`, e);
-					result.errors++;
-				}
+				// Safety: never propagate local deletes to remote — this prevents
+				// catastrophic vault wipes when Obsidian opens with an empty vault.
+				// See: https://github.com/stevecraig/obsidian-vault-rest-sync/issues/19
+				console.warn(`[sync] Skipping remote delete for ${remotePath} — remote delete is disabled for safety`);
+				delete fileStates[remotePath];
 			}
 			continue;
 		}
@@ -273,21 +255,24 @@ export async function performSync(
 					result.errors++;
 				}
 			} else {
-				// Remote unchanged — delete on server
-				onProgress?.(`Deleting remote (missing locally): ${remotePath}`);
+				// Safety: never propagate local absence to a remote delete — this caused
+				// catastrophic vault wipes when Obsidian opened with an empty/not-yet-loaded vault.
+				// See: https://github.com/stevecraig/obsidian-vault-rest-sync/issues/19
+				console.warn(`[sync] Skipping remote delete for ${remotePath} — remote delete is disabled for safety`);
+				onProgress?.(`Re-pulling (missing locally): ${remotePath}`);
 				try {
-					const deleted = await deleteFile(
-						settings.apiUrl,
-						settings.apiToken,
-						remotePath
-					);
-					if (deleted) {
-						result.deleted++;
-						emit("deleted", remotePath, "local");
-					}
-					delete fileStates[remotePath];
+					const pulled = await pullFile(app, settings, syncFolder, remotePath, result, "created");
+					fileStates[remotePath] = {
+						remoteSyncedAt: remoteEntry.updatedAt,
+						localModifiedAt: Date.now(),
+						status: "synced",
+						remoteHash: remoteEntry.hash,
+						localHash: pulled?.hash ?? remoteEntry.hash,
+						ancestorContent: pulled ? sizedAncestor(pulled.content) : undefined,
+					};
+					emit("pulled", remotePath, "remote");
 				} catch (e) {
-					console.error(`Remote Vault Sync: delete failed for ${remotePath}`, e);
+					console.error(`Remote Vault Sync: re-pull failed for ${remotePath}`, e);
 					result.errors++;
 				}
 			}
