@@ -6,6 +6,10 @@ export interface RemoteVaultSyncSettings {
 	apiToken: string;
 	syncFolder: string;
 	syncIntervalMinutes: number;
+	/** Allow pushing local edits to the remote server (default: true) */
+	allowEdits: boolean;
+	/** Allow deleting files on the remote server (default: false) */
+	allowDeletes: boolean;
 	/** Enable SSE-based live sync for real-time change notifications */
 	enableSSE: boolean;
 	/** Maximum reconnect delay for SSE in milliseconds */
@@ -21,6 +25,8 @@ export const DEFAULT_SETTINGS: RemoteVaultSyncSettings = {
 	apiToken: "",
 	syncFolder: "Remote Vault",
 	syncIntervalMinutes: 15,
+	allowEdits: true,
+	allowDeletes: false,
 	enableSSE: true,
 	sseReconnectMaxMs: 30000,
 	sseEventIdleMinutes: 5,
@@ -99,6 +105,38 @@ export class RemoteVaultSyncSettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 							this.plugin.restartSyncInterval();
 						}
+					})
+			);
+
+		containerEl.createEl("h3", { text: "Sync safety" });
+
+		new Setting(containerEl)
+			.setName("Allow pushing edits to remote")
+			.setDesc(
+				"When disabled, local edits are never pushed to the server. " +
+				"Sync becomes one-way: remote \u2192 local only."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.allowEdits)
+					.onChange(async (value) => {
+						this.plugin.settings.allowEdits = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Allow deleting files on remote")
+			.setDesc(
+				"When disabled, locally deleted files are never removed from the server. " +
+				"Prevents accidental vault wipes. A warning is logged for each skipped delete."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.allowDeletes)
+					.onChange(async (value) => {
+						this.plugin.settings.allowDeletes = value;
+						await this.plugin.saveSettings();
 					})
 			);
 
