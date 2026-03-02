@@ -312,6 +312,8 @@ export function defaultSettings() {
 		apiToken: "test-token",
 		syncFolder: "Remote Vault",
 		syncIntervalMinutes: 5,
+		allowEdits: true,
+		allowDeletes: true,
 	};
 }
 

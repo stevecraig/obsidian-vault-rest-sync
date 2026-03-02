@@ -3,6 +3,7 @@ import {
 	listFiles,
 	readFile,
 	writeFile,
+	deleteFile,
 	FileListEntry,
 	ApiError,
 } from "./api";
@@ -198,12 +199,32 @@ export async function performSync(
 					console.error(`Remote Vault Sync: conflict re-pull failed for ${remotePath}`, e);
 					result.errors++;
 				}
-			} else {
-				// Safety: never propagate local deletes to remote — this prevents
-				// catastrophic vault wipes when Obsidian opens with an empty vault.
-				// See: https://github.com/stevecraig/obsidian-vault-rest-sync/issues/19
-				console.warn(`[sync] Skipping remote delete for ${remotePath} — remote delete is disabled for safety`);
+			} else if (!settings.allowDeletes) {
+				// Deletes disabled — skip propagating local delete to remote
+				console.warn(`[sync] Skipping remote delete for ${remotePath} (allowDeletes is off)`);
 				delete fileStates[remotePath];
+			} else {
+				// Remote untouched — delete on server
+				onProgress?.(`Deleting remote: ${remotePath}`);
+				try {
+					const deleted = await deleteFile(
+						settings.apiUrl,
+						settings.apiToken,
+						remotePath
+					);
+					if (deleted) {
+						result.deleted++;
+						emit("deleted", remotePath, "local");
+					} else {
+						console.warn(
+							`Remote Vault Sync: server doesn't support DELETE for ${remotePath}`
+						);
+					}
+					delete fileStates[remotePath];
+				} catch (e) {
+					console.error(`Remote Vault Sync: delete failed for ${remotePath}`, e);
+					result.errors++;
+				}
 			}
 			continue;
 		}
@@ -254,11 +275,9 @@ export async function performSync(
 					console.error(`Remote Vault Sync: re-pull failed for ${remotePath}`, e);
 					result.errors++;
 				}
-			} else {
-				// Safety: never propagate local absence to a remote delete — this caused
-				// catastrophic vault wipes when Obsidian opened with an empty/not-yet-loaded vault.
-				// See: https://github.com/stevecraig/obsidian-vault-rest-sync/issues/19
-				console.warn(`[sync] Skipping remote delete for ${remotePath} — remote delete is disabled for safety`);
+			} else if (!settings.allowDeletes) {
+				// Deletes disabled — re-pull instead of deleting on server
+				console.warn(`[sync] Skipping remote delete for ${remotePath} (allowDeletes is off)`);
 				onProgress?.(`Re-pulling (missing locally): ${remotePath}`);
 				try {
 					const pulled = await pullFile(app, settings, syncFolder, remotePath, result, "created");
@@ -273,6 +292,24 @@ export async function performSync(
 					emit("pulled", remotePath, "remote");
 				} catch (e) {
 					console.error(`Remote Vault Sync: re-pull failed for ${remotePath}`, e);
+					result.errors++;
+				}
+			} else {
+				// Remote unchanged — delete on server
+				onProgress?.(`Deleting remote (missing locally): ${remotePath}`);
+				try {
+					const deleted = await deleteFile(
+						settings.apiUrl,
+						settings.apiToken,
+						remotePath
+					);
+					if (deleted) {
+						result.deleted++;
+						emit("deleted", remotePath, "local");
+					}
+					delete fileStates[remotePath];
+				} catch (e) {
+					console.error(`Remote Vault Sync: delete failed for ${remotePath}`, e);
 					result.errors++;
 				}
 			}
@@ -336,12 +373,16 @@ export async function performSync(
 									// Auto-merge succeeded — write merged content locally and push
 									onProgress?.(`Auto-merged: ${remotePath}`);
 									await app.vault.modify(localFile, mergeResult.merged);
-									await writeFile(
-										settings.apiUrl,
-										settings.apiToken,
-										remotePath,
-										mergeResult.merged
-									);
+									if (settings.allowEdits) {
+										await writeFile(
+											settings.apiUrl,
+											settings.apiToken,
+											remotePath,
+											mergeResult.merged
+										);
+									} else {
+										console.warn(`[sync] Skipping remote write for ${remotePath} (allowEdits is off)`);
+									}
 									const mergedHash = await sha256(mergeResult.merged);
 									fileStates[remotePath] = {
 										remoteSyncedAt: new Date().toISOString(),
@@ -400,24 +441,28 @@ export async function performSync(
 				}
 			} else if (!remoteChanged && localChanged) {
 				// Local changed, remote untouched — push
-				onProgress?.(`Pushing: ${remotePath}`);
-				try {
-					const pushContent = localContent ?? await app.vault.read(localFile);
-					const pushHash = localHash ?? await sha256(pushContent);
-					await pushFile(app, settings, syncFolder, remotePath, localFile);
-					fileStates[remotePath] = {
-						remoteSyncedAt: new Date().toISOString(),
-						localModifiedAt: localFile.stat.mtime,
-						status: "synced",
-						remoteHash: pushHash,
-						localHash: pushHash,
-						ancestorContent: sizedAncestor(pushContent),
-					};
-					result.pushed++;
-					emit("pushed", remotePath, "local");
-				} catch (e) {
-					console.error(`Remote Vault Sync: push failed for ${remotePath}`, e);
-					result.errors++;
+				if (!settings.allowEdits) {
+					console.warn(`[sync] Skipping remote write for ${remotePath} (allowEdits is off)`);
+				} else {
+					onProgress?.(`Pushing: ${remotePath}`);
+					try {
+						const pushContent = localContent ?? await app.vault.read(localFile);
+						const pushHash = localHash ?? await sha256(pushContent);
+						await pushFile(app, settings, syncFolder, remotePath, localFile);
+						fileStates[remotePath] = {
+							remoteSyncedAt: new Date().toISOString(),
+							localModifiedAt: localFile.stat.mtime,
+							status: "synced",
+							remoteHash: pushHash,
+							localHash: pushHash,
+							ancestorContent: sizedAncestor(pushContent),
+						};
+						result.pushed++;
+						emit("pushed", remotePath, "local");
+					} catch (e) {
+						console.error(`Remote Vault Sync: push failed for ${remotePath}`, e);
+						result.errors++;
+					}
 				}
 			} else {
 				// Neither changed — ensure state exists with hashes
@@ -480,24 +525,28 @@ export async function performSync(
 			}
 		} else if (!state) {
 			// New local file, doesn't exist on server — push
-			onProgress?.(`Pushing new: ${relPath}`);
-			try {
-				const content = await app.vault.read(localFile);
-				const h = await sha256(content);
-				await pushFile(app, settings, syncFolder, relPath, localFile);
-				fileStates[relPath] = {
-					remoteSyncedAt: new Date().toISOString(),
-					localModifiedAt: localFile.stat.mtime,
-					status: "synced",
-					remoteHash: h,
-					localHash: h,
-					ancestorContent: sizedAncestor(content),
-				};
-				result.pushed++;
-				emit("pushed", relPath, "local");
-			} catch (e) {
-				console.error(`Remote Vault Sync: push failed for ${relPath}`, e);
-				result.errors++;
+			if (!settings.allowEdits) {
+				console.warn(`[sync] Skipping remote write for ${relPath} (allowEdits is off)`);
+			} else {
+				onProgress?.(`Pushing new: ${relPath}`);
+				try {
+					const content = await app.vault.read(localFile);
+					const h = await sha256(content);
+					await pushFile(app, settings, syncFolder, relPath, localFile);
+					fileStates[relPath] = {
+						remoteSyncedAt: new Date().toISOString(),
+						localModifiedAt: localFile.stat.mtime,
+						status: "synced",
+						remoteHash: h,
+						localHash: h,
+						ancestorContent: sizedAncestor(content),
+					};
+					result.pushed++;
+					emit("pushed", relPath, "local");
+				} catch (e) {
+					console.error(`Remote Vault Sync: push failed for ${relPath}`, e);
+					result.errors++;
+				}
 			}
 		}
 	}
